@@ -12,44 +12,72 @@ MODULE mo_emulator
   USE mo_physical_constants,   ONLY : vtmpc1, cpd, grav
   USE m_gp
   USE m_gp_example
+  USE mo_mpi, ONLY: p_parallel,p_parallel_io,p_io,p_bcast
 
   IMPLICIT NONE
  
 
   PRIVATE
-  type(SparseGP), allocatable :: gp_emu
-  PUBLIC :: emulator,train
+  CLASS(BaseGP), allocatable :: gp_emu
+  PUBLIC :: emulator,train,initEmulatorStream
 
 CONTAINS
 
+  SUBROUTINE initEmulatorStream
+	write(*,*) 'Init emulator streams'
+  END SUBROUTINE initEmulatorStream
+
   SUBROUTINE calcInversions(klev,iprofile,pblh,inv,mean)
     INTEGER, INTENT(IN)    :: klev,pblh
-    real(wp), INTENT(IN)   :: iprofile,pblh
+    real(wp), INTENT(IN)   :: iprofile(klev)
     real(wp), INTENT(OUT)  :: inv,mean
+    real(wp)   		   :: iprofile_tmp(klev),profile_min,profile_max
     WRITE(*,*) 'Calculate emulator inversion'
-    iprofile= iprofile(pblh:30)
-    profile_min=min(iprofile)
-    profile_max=max(iprofile)
+    iprofile_tmp= iprofile(pblh:30)
+    profile_min=minval(iprofile_tmp)
+    profile_max=maxval(iprofile_tmp)
     inv=profile_max - profile_min
-    mean = sum(profile)/size(profile)
+    mean = sum(iprofile_tmp)/size(iprofile_tmp)
   END SUBROUTINE calcInversions
 
-  SUBROUTINE calcAVG(klev, iprofile)
-    INTEGER, INTENT(IN)    :: klev
-    real(wp), INTENT(IN)   :: iprofile 
-     WRITE(*,*) 'Calculate mean'
-  END SUBROUTINE calcAVG
 
-  SUBROUTINE calcEmuInputs(klev,pnun,tpot_emu,pbl_emu,clw_emu,sphum_emu,emuInputVec)
+  SUBROUTINE calcEmuInputs(klev,pnum,tpot_emu,pbl_emu,clw_emu,sphum_emu,emuInputVec)
      INTEGER, INTENT(IN)    :: klev,pnum
-     REAL(wp), INTENT(IN)   :: tpot_emu(klev),pbl_emu(klev),clw_emu(klev),sphum_emu(klev)
+     REAL(wp), INTENT(IN)   :: tpot_emu(klev),clw_emu(klev),sphum_emu(klev),pbl_emu
      REAL(wp), INTENT(OUT)  :: emuInputVec(pnum)
+     REAL(wp)		    :: tpot_mean,tpot_inv,h2o_mean,h2o_inv,h2o(klev)
+     h2o = clw_emu+sphum_emu
+     CALL calcInversions(klev,tpot_emu,int(pbl_emu),tpot_inv,tpot_mean)
+     CALL calcInversions(klev,h2o,int(pbl_emu),h2o_inv,h2o_mean)
+     emuInputVec(1)=h2o_inv
+     emuInputVec(2)=tpot_inv
+     emuInputVec(3)=h2o(int(pbl_emu))
+     emuInputVec(4)=tpot_emu(int(pbl_emu))
+     emuInputVec(5)=1000000
      WRITE(*,*) 'Calculate emulator inputs'
   END SUBROUTINE calcEmuInputs
 
   SUBROUTINE train()
-     allocate(gp_emu, source=SparseGP('gp_test.out'))
-     WRITE(*,*) 'Trainign emulator'
+  	character(len=100)          :: label
+  	character(len=*), parameter :: filename = 'gp_test.out'
+  	integer u
+
+  	open(newunit=u, file=filename)
+  	read (u,'(A)') label
+  	close(u)
+  
+  	select case (label)
+  		case('SparseGP')
+     			allocate(gp_emu, source = SparseGP(filename))
+  		case('DenseGP')
+     			allocate(gp, source = DenseGP(filename))
+  		case default
+     			print *, "Incompatible data file (unrecognised GP type '", label, "')"
+     			stop 1
+		end select
+     	IF (p_parallel) THEN ! In parallel mode        
+       		CALL p_bcast(gp_emu,p_io)
+     !WRITE(*,*) 'Trainign emulator'
   END SUBROUTINE train
 
   SUBROUTINE emulator(kproma, kbdim, ktdia, klev, klevp1, &
@@ -87,7 +115,7 @@ CONTAINS
     INTEGER :: jl,jk
     LOGICAL :: lstratocum(kbdim)
     INTEGER :: pnum = 5            ! number of parameter used in emulator
-    REAL(wp) :: emuInputVec(pnun)
+    REAL(wp) :: emuInputVec(5)
 ! Initialize the output
     lmask_emul(1:kproma,:) = .FALSE.
     paclc_emul(1:kproma,:) = 0.0_wp
@@ -124,7 +152,7 @@ CONTAINS
           IF ((pfull(jl,jk) > 80000.).AND.(tfull(jl,jk)>273.15)) THEN
             lmask_emul(jl,jk) = .TRUE.
 ! Set the cloud fraction to some arbitrary value
-	    CALL calcEmuInputs(klev,pnun,tpot_emu,pbl_emu,clw_emu,sphum_emu,emuInputVec)
+	    CALL calcEmuInputs(klev,pnum,tpotfull(jl,jk),pbl(jk),pxlm1(jl,jk),pqm1(jl,jk),emuInputVec)
 	    !if in correct region calc emulator input values
             paclc_emul(jl,jk) = gp_emu%predict(emuInputVec,pnum)
           END IF
