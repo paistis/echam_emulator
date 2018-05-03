@@ -215,7 +215,12 @@ CONTAINS
     paclc_emul(1:kproma,:) = 0.0_wp
     pxl_emul(1:kproma,:) = 0.0_wp
     pacdnc_emul(1:kproma,:) = 0.0_wp
-
+    emulators%emu_cf(:,:) = 00.0_wp
+    emulators%tpot_inv(:,:) =0.0_wp
+    emulators%tpot_pbl(:,:) =0.0_wp
+    emulators%h2o_pbl(:,:) =  0.0_wp
+    emulators%h2o_inv(:,:) = 0.0_wp
+    emulators%pbl_num(:,:) =  0.0_wp
 !calculate emultor inputvalues
     
      !call train()
@@ -246,15 +251,16 @@ CONTAINS
           IF ((pfull(jl,jk) > 80000.).AND.(tfull(jl,jk)>273.15)) THEN
             lmask_emul(jl,jk) = .TRUE.
 ! Set the cloud fraction to some arbitrary value
-	    CALL calcEmuInputs(klev,pnum,tpotfull(jl,jk),pbl(jk),pxlm1(jl,jk),pqm1(jl,jk),emuInputVec)
+	    emuInputVec(:) = 0.0_wp
+	    CALL calcEmuInputs(klev,pnum,tpotfull(jl,:),pbl(jk),pxlm1(jl,:),pqm1(jl,:),emuInputVec)
 	    !if in correct region calc emulator input values
             paclc_emul(jl,jk) = gp_emu%predict(emuInputVec,pnum)
-	    emulators%emu_cf(jl,jk) = paclc_emul(jl,jk)
-	    emulators%tpot_inv(jl,jk) = emuInputVec(2)
-            emulators%tpot_pbl(jl,jk) = emuInputVec(4)
-            emulators%h2o_pbl(jl,jk) =  emuInputVec(3)
-            emulators%h2o_inv(jl,jk) = emuInputVec(1)
-            emulators%pbl_num(jl,jk) =  emuInputVec(5)
+	    !emulators%emu_cf(jl,jk) = paclc_emul(jl,jk)
+	    !emulators%tpot_inv(jl,jk) = emuInputVec(2)
+            emulators%tpot_pbl(jl,jk) = 0.0_wp ! emuInputVec(4)
+            !emulators%h2o_pbl(jl,jk) =  emuInputVec(3)
+            !emulators%h2o_inv(jl,jk) = emuInputVec(1)
+            !emulators%pbl_num(jl,jk) =  emuInputVec(5)
           END IF
         ENDDO 
       END IF 
