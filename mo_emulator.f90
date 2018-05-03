@@ -20,11 +20,104 @@ MODULE mo_emulator
   PRIVATE
   CLASS(BaseGP), allocatable :: gp_emu
   PUBLIC :: emulator,train,initEmulatorStream
+  ! type definition
+  TYPE t_emulator
+    REAL(wp), POINTER          :: tpot_inv(:,:)       ! potential temperature inversion strengt [m]
+    REAL(wp), POINTER          :: tpot_pbl(:,:)      ! potential temperature at pbl [m]
+    REAL(wp), POINTER          :: h2o_inv(:,:)       ! h2o inversion
+    REAL(wp), POINTER          :: h2o_pbl(:,:)    ! h2o mixin ration at pbl[kg]
+    REAL(wp), POINTER          :: pbl_num(:,:)     ! particle number at pbl[m3]
+    REAL(wp), POINTER          :: emu_cf(:,:)  ! emulated cloud fraction[m]
+  END TYPE t_emulator
 
+  ! emulator_stream
+  ! emulatorvars is used to check namelist input for valid names
+  INTEGER, PARAMETER           :: nemulatorvars=6! s.stadtler
+  CHARACTER(LEN=32)            :: emulatorvars(1:nemulatorvars)= &
+                                (/'tpot_inv            ', &
+                                  'tpot_pbl          ', &
+                                  'h2o_inv            ', &
+                                  'h2o_pbl         ', &  
+                                  'pbl_num          ', &  
+                                  'emu_cf       ' /)
+
+
+  ! variable pointers
+  TYPE(t_emulator)               :: emulators
 CONTAINS
 
   SUBROUTINE initEmulatorStream
-	write(*,*) 'Init emulator streams'
+    
+    USE mo_control,             ONLY: nlev
+    USE mo_submodel_streams,    ONLY: emulator_lpost, emulator_tinterval, emulatornam
+    USE mo_string_utls,         ONLY: st1_in_st2_proof
+    USE mo_util_string,         ONLY: tolower
+    USE mo_exception,           ONLY: finish
+    USE mo_memory_base,         ONLY: t_stream, new_stream, &
+                                      default_stream_setting, &
+                                      add_stream_element, &
+                                      AUTO, BELOWSUR
+    ! local variables
+    INTEGER, PARAMETER             :: ndefault = 6
+  CHARACTER(LEN=32)            :: defnam(1:nemulatorvars)= &
+                                (/'tpot_inv            ', &
+                                  'tpot_pbl          ', &
+                                  'h2o_inv            ', &
+                                  'h2o_pbl         ', &  
+                                  'pbl_num          ', &  
+                                  'emu_cf       ' /)
+ 
+    TYPE (t_stream), POINTER       :: emulator_stream
+    INTEGER                        :: ierr
+    LOGICAL                        :: lpost
+    !-- handle ALL and DEFAULT options
+    IF (TRIM(tolower(emulatornam(1))) == 'all')     emulatornam(1:nemulatorvars) = emulatorvars(:)
+    IF (TRIM(tolower(emulatornam(1))) == 'default') emulatornam(1:ndefault) = defnam(:)
+
+    !-- check that all variable names from namelist are valid
+    IF (.NOT. st1_in_st2_proof( emulatornam, emulatorvars, ierr=ierr) ) THEN
+      IF (ierr > 0) CALL finish ( 'ini_emulator_stream', 'variable '// &
+                                  emulatornam(ierr)//' does not exist in emulator stream' )
+    END IF
+
+    !-- open new stream
+    !SF #383: registering emulator to rerun storage
+    CALL new_stream (emulator_stream,'emulator',lpost=emulator_lpost,lrerun=.TRUE., &
+         interval=emulator_tinterval)
+    CALL default_stream_setting (emulator_stream, lrerun = .TRUE., &
+         contnorest = .TRUE., table = 199, &
+         laccu = .false., code = AUTO)
+
+    !-- add individual variables to stream
+    lpost = st1_in_st2_proof( 'tpot_inv', emulatornam)
+    CALL add_stream_element (emulator_stream, 'tpot_inv', emulators%tpot_inv, &
+         longname = 'Potential temperature inversion', &
+         units = 'K', lpost = lpost)
+    
+    !lpost = st1_in_st2_proof( 'tpot_pbl', emulatornam)
+    !CALL add_stream_element (emulator_stream, 'tpot_pbl', emulators%tpot_pbl, &                                            &
+    !     longname = 'potential temperatuer at boundary layer', &
+    !     units = 'K', lpost = lpost)
+    
+    lpost = st1_in_st2_proof( 'h2o_inv', emulatornam)
+    CALL add_stream_element (emulator_stream, 'h2o_inv', emulators%h2o_inv, &
+         longname = 'h2o inversion', &
+         units = 'kg', lpost = lpost)
+    
+    lpost = st1_in_st2_proof( 'h2o_pbl', emulatornam)
+    CALL add_stream_element (emulator_stream, 'h2o_pbl', emulators%h2o_pbl, &
+         longname = 'h2o in plb', &
+         units = 'm3', lpost = lpost)
+
+    lpost = st1_in_st2_proof( 'pbl_num', emulatornam)
+    CALL add_stream_element (emulator_stream, 'pbl_num', emulators%pbl_num, &
+         longname = 'number of particles in pbl', &
+         units = 'kg kg-1', lpost=lpost)
+
+    lpost = st1_in_st2_proof( 'emu_cf', emulatornam)
+    CALL add_stream_element (emulator_stream, 'emu_cf', emulators%emu_cf, &
+         longname = 'cloud fraction', &
+         units = '1', lpost=lpost)
   END SUBROUTINE initEmulatorStream
 
   SUBROUTINE calcInversions(klev,iprofile,pblh,inv,mean)
@@ -32,8 +125,8 @@ CONTAINS
     real(wp), INTENT(IN)   :: iprofile(klev)
     real(wp), INTENT(OUT)  :: inv,mean
     real(wp)   		   :: iprofile_tmp(klev),profile_min,profile_max
-    WRITE(*,*) 'Calculate emulator inversion'
-    iprofile_tmp= iprofile(pblh:30)
+    !WRITE(*,*) 'Calculate emulator inversion'
+    iprofile_tmp= iprofile(pblh:klev)
     profile_min=minval(iprofile_tmp)
     profile_max=maxval(iprofile_tmp)
     inv=profile_max - profile_min
@@ -54,7 +147,7 @@ CONTAINS
      emuInputVec(3)=h2o(int(pbl_emu))
      emuInputVec(4)=tpot_emu(int(pbl_emu))
      emuInputVec(5)=1000000
-     WRITE(*,*) 'Calculate emulator inputs'
+     !WRITE(*,*) 'Calculate emulator inputs'
   END SUBROUTINE calcEmuInputs
 
   SUBROUTINE train()
@@ -70,13 +163,14 @@ CONTAINS
   		case('SparseGP')
      			allocate(gp_emu, source = SparseGP(filename))
   		case('DenseGP')
-     			allocate(gp, source = DenseGP(filename))
+     			allocate(gp_emu, source = DenseGP(filename))
   		case default
      			print *, "Incompatible data file (unrecognised GP type '", label, "')"
      			stop 1
 		end select
-     	IF (p_parallel) THEN ! In parallel mode        
-       		CALL p_bcast(gp_emu,p_io)
+     	!IF (p_parallel) THEN ! In parallel mode        
+       	!	CALL p_bcast(gp_emu,p_io)
+	!END IF
      !WRITE(*,*) 'Trainign emulator'
   END SUBROUTINE train
 
@@ -124,7 +218,7 @@ CONTAINS
 
 !calculate emultor inputvalues
     
-     
+     !call train()
 
 ! For testing, set LMASK_EMUL and PACLC_EMUL based on
 ! - surface type (longitude, latitude)
@@ -155,6 +249,12 @@ CONTAINS
 	    CALL calcEmuInputs(klev,pnum,tpotfull(jl,jk),pbl(jk),pxlm1(jl,jk),pqm1(jl,jk),emuInputVec)
 	    !if in correct region calc emulator input values
             paclc_emul(jl,jk) = gp_emu%predict(emuInputVec,pnum)
+	    emulators%emu_cf(jl,jk) = paclc_emul(jl,jk)
+	    emulators%tpot_inv(jl,jk) = emuInputVec(2)
+            emulators%tpot_pbl(jl,jk) = emuInputVec(4)
+            emulators%h2o_pbl(jl,jk) =  emuInputVec(3)
+            emulators%h2o_inv(jl,jk) = emuInputVec(1)
+            emulators%pbl_num(jl,jk) =  emuInputVec(5)
           END IF
         ENDDO 
       END IF 
