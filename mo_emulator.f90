@@ -19,7 +19,7 @@ MODULE mo_emulator
 
   PRIVATE
   CLASS(BaseGP), allocatable :: gp_emu
-  PUBLIC :: emulator,train,initEmulatorStream
+  PUBLIC :: emulator,train,initEmulatorStream,emulators,set_emulatorvars
   ! type definition
   TYPE t_emulator
     REAL(wp), POINTER          :: tpot_inv(:,:)       ! potential temperature inversion strengt [m]
@@ -27,9 +27,8 @@ MODULE mo_emulator
     REAL(wp), POINTER          :: h2o_inv(:,:)       ! h2o inversion
     REAL(wp), POINTER          :: h2o_pbl(:,:)    ! h2o mixin ration at pbl[kg]
     REAL(wp), POINTER          :: pbl_num(:,:)     ! particle number at pbl[m3]
-    REAL(wp), POINTER          :: emu_cf(:,:)  ! emulated cloud fraction[m]
+    REAL(wp), POINTER          :: emu_cf(:,:,:)  ! emulated cloud fraction[m]
   END TYPE t_emulator
-
   ! emulator_stream
   ! emulatorvars is used to check namelist input for valid names
   INTEGER, PARAMETER           :: nemulatorvars=6! s.stadtler
@@ -138,15 +137,16 @@ CONTAINS
      INTEGER, INTENT(IN)    :: klev,pnum
      REAL(wp), INTENT(IN)   :: tpot_emu(klev),clw_emu(klev),sphum_emu(klev),pbl_emu
      REAL(wp), INTENT(OUT)  :: emuInputVec(pnum)
-     REAL(wp)		    :: tpot_mean,tpot_inv,h2o_mean,h2o_inv,h2o(klev)
+     REAL(wp)		    :: tpot_mean,tpot_inv_,h2o_mean,h2o_inv,h2o(klev)
      h2o = clw_emu+sphum_emu
-     CALL calcInversions(klev,tpot_emu,int(pbl_emu),tpot_inv,tpot_mean)
+     CALL calcInversions(klev,tpot_emu,int(pbl_emu),tpot_inv_,tpot_mean)
      CALL calcInversions(klev,h2o,int(pbl_emu),h2o_inv,h2o_mean)
      emuInputVec(1)=h2o_inv
-     emuInputVec(2)=tpot_inv
+     emuInputVec(2)=tpot_inv_
      emuInputVec(3)=h2o(int(pbl_emu))
      emuInputVec(4)=tpot_emu(int(pbl_emu))
-     emuInputVec(5)=1000000
+     emuInputVec(5)=pbl_emu
+     emuInputVec(6)=1000000
      !WRITE(*,*) 'Calculate emulator inputs'
   END SUBROUTINE calcEmuInputs
 
@@ -161,9 +161,9 @@ CONTAINS
   
   	select case (label)
   		case('SparseGP')
-     			allocate(gp_emu, source = SparseGP(filename))
+     			IF (.NOT. ALLOCATED(gp_emu)) allocate(gp_emu, source = SparseGP(filename))
   		case('DenseGP')
-     			allocate(gp_emu, source = DenseGP(filename))
+     			IF (.NOT. ALLOCATED(gp_emu)) allocate(gp_emu, source = DenseGP(filename))
   		case default
      			print *, "Incompatible data file (unrecognised GP type '", label, "')"
      			stop 1
@@ -174,14 +174,14 @@ CONTAINS
      !WRITE(*,*) 'Trainign emulator'
   END SUBROUTINE train
 
-  SUBROUTINE emulator(kproma, kbdim, ktdia, klev, klevp1, &
+  SUBROUTINE emulator(kproma, kbdim, ktdia, klev, klevp1, krow, &
                       land_fraction, philon, philat, pfull, phalf, tfull, tpotfull, &
 		      pbl,pxlm1,pqm1, &
                       lmask_emul, paclc_emul, pxl_emul, pacdnc_emul)          
 
 ! Input for the emulator (to be expanded ...)
 
-    INTEGER, INTENT(IN)    :: kbdim, klevp1, klev, kproma, ktdia
+    INTEGER, INTENT(IN)    :: kbdim, klevp1, klev, kproma, ktdia,krow
 
     REAL(wp), INTENT(in) :: &
       land_fraction(kbdim), & ! Land fraction
@@ -204,26 +204,24 @@ CONTAINS
       paclc_emul(kbdim,klev),& ! Cloud fraction from the emulator 
       pxl_emul(kbdim,klev),  & ! Cloud liquid water [kg/kg] from the emulator  
       pacdnc_emul(kbdim,klev)  ! Cloud droplet number concentration [1/m3] 
+   
                                ! from the emulator
 ! Local variables   
     INTEGER :: jl,jk
     LOGICAL :: lstratocum(kbdim)
-    INTEGER :: pnum = 5            ! number of parameter used in emulator
-    REAL(wp) :: emuInputVec(5)
+    INTEGER :: pnum = 7            ! number of parameter used in emulator
+    REAL(wp), dimension(:), allocatable :: emuInputVec
+    allocate(real(dp) ::emuInputVec(6))
+
 ! Initialize the output
     lmask_emul(1:kproma,:) = .FALSE.
     paclc_emul(1:kproma,:) = 0.0_wp
     pxl_emul(1:kproma,:) = 0.0_wp
     pacdnc_emul(1:kproma,:) = 0.0_wp
-    emulators%emu_cf(:,:) = 00.0_wp
-    emulators%tpot_inv(:,:) =0.0_wp
-    emulators%tpot_pbl(:,:) =0.0_wp
-    emulators%h2o_pbl(:,:) =  0.0_wp
-    emulators%h2o_inv(:,:) = 0.0_wp
-    emulators%pbl_num(:,:) =  0.0_wp
+
 !calculate emultor inputvalues
     
-     !call train()
+    call train()
 
 ! For testing, set LMASK_EMUL and PACLC_EMUL based on
 ! - surface type (longitude, latitude)
@@ -252,23 +250,74 @@ CONTAINS
             lmask_emul(jl,jk) = .TRUE.
 ! Set the cloud fraction to some arbitrary value
 	    emuInputVec(:) = 0.0_wp
-	    CALL calcEmuInputs(klev,pnum,tpotfull(jl,:),pbl(jk),pxlm1(jl,:),pqm1(jl,:),emuInputVec)
+	    CALL calcEmuInputs(klev,pnum,tpotfull(jl,:),47.0_wp,pxlm1(jl,:),pqm1(jl,:),emuInputVec)
+	    emulators%tpot_inv(jl,krow) = emuInputVec(2)
+	    emulators%h2o_inv(jl,krow) = emuInputVec(1)
+ 	    !emulators%h2o_pbl(jl,krow) = emuInputVec(3)
+	    !emulators%tpot_pbl(jl,krow) = emuInputVec(4)
 	    !if in correct region calc emulator input values
-            paclc_emul(jl,jk) = gp_emu%predict(emuInputVec,pnum)
-	    !emulators%emu_cf(jl,jk) = paclc_emul(jl,jk)
-	    !emulators%tpot_inv(jl,jk) = emuInputVec(2)
-            emulators%tpot_pbl(jl,jk) = 0.0_wp ! emuInputVec(4)
-            !emulators%h2o_pbl(jl,jk) =  emuInputVec(3)
-            !emulators%h2o_inv(jl,jk) = emuInputVec(1)
-            !emulators%pbl_num(jl,jk) =  emuInputVec(5)
+	    emuInputVec(1) = 0.38093900680542
+            emuInputVec(2)= 0.58377075195312
+ 	    emuInputVec(3)=0.714662492275238
+ 	    emuInputVec(4)=0.552856445312
+            emuInputVec(5)=0.44755252014
+            emuInputVec(6)=0.527254
+            !emuInputVec(7)=0.73236823
+            paclc_emul(jl,jk) = gp_emu%predict(emuInputVec(:),0)
+	    !write(*,*) 'emulator cloud', paclc_emul(jl,jk)
           END IF
         ENDDO 
       END IF 
 
     ENDDO
-
+    DEALLOCATE (gp_emu)
 !   write(*,*) 'EMULATOR test'
   
   END SUBROUTINE emulator
+
 	
+  	function mean(x,dmn) result(res)
+		integer dmn
+		real(dp) x(dmn)
+		real(dp) :: res
+
+		res = sum(x)/dmn
+	end function mean
+
+	function std(x,meanx,dmn) result(res)
+		integer dmn
+		real(dp) x(dmn)
+		real(dp) :: meanx
+		real(dp) :: res
+
+		res = sqrt(sum((x - meanx)**2)/dmn)
+	end function std
+	 
+	function standardize(x,meanx,stdx,dmn) result(res)
+		integer dmn
+		real(dp) x(dmn)
+
+		real(dp), dimension(dmn) :: res
+
+		real(dp) :: meanx 
+		real(dp) :: stdx
+
+
+		res = (x - meanx)/stdx
+	end function standardize
+
+
+	SUBROUTINE set_emulatorvars(kproma, kbdim, ktdia, klev, klevp1,krow,paclc_emul)
+		 INTEGER, INTENT(IN)    :: kbdim, klevp1, klev, kproma, ktdia,krow
+    		 REAL(wp), INTENT(IN) :: paclc_emul(kbdim,klev) ! Cloud fraction from the emulator 
+		 INTEGER :: jl
+		  DO jl=1,klev
+		 	emulators%emu_cf(1:kproma,jl,krow) = paclc_emul(1:kproma,jl)
+			!write(*,*) 'emul cloudcover', paclc_emul(1:kproma,jl)
+		  ENDDO
+		  
+		  !emulators%tpot_inv(1:kproma,krow) = REAL(tpot_inv(1:kproma),wp)
+
+ 	END SUBROUTINE set_emulatorvars
+
 END MODULE mo_emulator
